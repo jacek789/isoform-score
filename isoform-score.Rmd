@@ -4,9 +4,15 @@ output:
   html_document: default
   html_notebook: default
 ---
-```{r head, results='hide'}
+
+```{r setup, echo=F}
+knitr::opts_chunk$set(cache = T)
+```
+
+```{r head, results='hide', message=F}
+library(tictoc)
+tic()
 if(!require(biomaRt)){source("https://bioconductor.org/biocLite.R"); biocLite("biomaRt"); library(biomaRt)}
-# library(tictoc)
 library(ggplot2)
 library(stringr)
 library(readr)
@@ -24,8 +30,8 @@ source("head.R")
 ```{r read_transcript_rna_tissue}
 # transcripts <- read_tsv("data/transcript_rna_tissue.tsv")
 # dir.create("saved-r-objects", showWarnings=F)
-# saveRDS(transcripts, "saved-r-objects/transcripts.RDS")
-transcripts <- readRDS("saved-r-objects/transcripts.RDS")
+# write_rds(transcripts, "saved-r-objects/transcripts.RDS")
+transcripts <- read_rds("saved-r-objects/transcripts.RDS")
 ```
 ```{r, eval=FALSE, include=FALSE}
 listEnsembl()
@@ -74,10 +80,10 @@ ensembl.88 %>%
 	filter(chromosome_name %in% 1:22) %>%
 	tbl_df %>%
 	senv(ensembl.cds)
-saveRDS(ensembl.cds, "saved-r-objects/ensembl.cds.RDS")
+write_rds(ensembl.cds, "saved-r-objects/ensembl.cds.RDS")
 ```
 ```{r read_ensembl3}
-ensembl.cds <- readRDS("saved-r-objects/ensembl.cds.RDS")
+ensembl.cds <- read_rds("saved-r-objects/ensembl.cds.RDS")
 ```
 
 
@@ -118,6 +124,7 @@ Wyniki z bigWigAverageOverBed dla przykładowego CDS:
 * max 0.363  
 
 ![](pictures/ENST00000236959.1.png)
+
 ```{r}
 # chr2 ENSG00000138363 ENST00000236959 genomic_coding_start 215312143, genomic_coding_end 215312161
 # conservation data
@@ -161,7 +168,7 @@ ensembl.cds %>%
 
 ### Policzenie konserwacji
 [hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
-```{bash conservation_scoring_canonical_transcripts, eval=F}
+```{bash conservation_scoring_canonical_transcripts}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -200,7 +207,7 @@ ensembl.cds %>%
 ```
 
 ### Policzenie konserwacji regionów niekanonicznych
-```{bash conservation_scoring_noncanonical_transcripts, eval=F}
+```{bash conservation_scoring_noncanonical_transcripts}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -258,12 +265,12 @@ phasta.cons.noncanonical %>%
 
 ggplot(scoring_summary_transcripts %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) + 
 	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
-# ggsave("canonical-transcripts.png")
+# ggsave("plots/canonical-transcripts.png")
 
 ggplot(scoring_summary_transcripts) + 
 	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
 	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
-# ggsave("canonical-transcripts2.png")
+# ggsave("plots/canonical-transcripts2.png")
 ```
 
 # APPRIS
@@ -303,7 +310,7 @@ ensembl.cds %>%
 
 ### Policzenie konserwacji transkryptów kanonicznych (APPRIS annotation)
 [hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
-```{bash conservation_scoring_canonical_appris, eval=F}
+```{bash conservation_scoring_canonical_appris}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -341,7 +348,7 @@ ensembl.cds %>%
 ```
 
 ### Policzenie konserwacji regionów niekanonicznych (APPRIS annotation)
-```{bash conservation_scoring_noncanonical_appris, eval=F}
+```{bash conservation_scoring_noncanonical_appris}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -397,12 +404,12 @@ phasta.cons.noncanonical %>%
 
 ggplot(scoring_summary_appris %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) + 
 	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
-# ggsave("canonical-appris.png")
+# ggsave("plots/canonical-appris.png")
 
 ggplot(scoring_summary_appris) + 
 	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
 	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
-# ggsave("canonical-appris2.png")
+# ggsave("plots/canonical-appris2.png")
 ```
 
 # UCSC
@@ -439,8 +446,8 @@ ensembl.88.ucsc <- getBM(attributes=c('chromosome_name',
 ```
 
 ```{r }
-# saveRDS(ensembl.88.ucsc, "saved-r-objects/ensembl.ucsc.RDS")
-ensembl.ucsc <- readRDS("saved-r-objects/ensembl.ucsc.RDS")
+# write_rds(ensembl.88.ucsc, "saved-r-objects/ensembl.ucsc.RDS")
+ensembl.ucsc <- read_rds("saved-r-objects/ensembl.ucsc.RDS")
 ```
 ## Konserwacja ewolucyjna transkryptu kanonicznego (UCSC)
 ### Stworzenie pliku *.bam z transkryptami kanonicznymi (UCSC)
@@ -469,7 +476,7 @@ ensembl.cds %>%
 
 ### Policzenie konserwacji dla transkryptów kanonicznych (UCSC)
 [hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
-```{bash conservation_scoring_canonical_ucsc, eval=F}
+```{bash conservation_scoring_canonical_ucsc}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -507,7 +514,7 @@ ensembl.cds %>%
 ```
 
 ### Policzenie konserwacji dla regionów niekanonicznych (UCSC)
-```{bash conservation_scoring_noncanonical_ucsc, eval=F}
+```{bash conservation_scoring_noncanonical_ucsc}
 PATH=$PATH:/home/jhajto/programs/
 DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
 
@@ -563,12 +570,12 @@ phasta.cons.noncanonical %>%
 
 ggplot(scoring_summary_ucsc %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) +
 	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
-# ggsave("canonical-ucsc.png")
+# ggsave("plots/canonical-ucsc.png")
 
 ggplot(scoring_summary_ucsc) +
 	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
 	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
-# ggsave("canonical-ucsc2.png")
+# ggsave("plots/canonical-ucsc2.png")
 ```
 
 
@@ -636,6 +643,7 @@ venn.plot <- draw.pairwise.venn(area1=area1,
 																category=c("Appris", "UCSC"))
 # grid.newpage()
 # grid.draw(venn.plot)
+toc()
 ```
 
 
