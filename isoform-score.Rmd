@@ -1,0 +1,661 @@
+---
+title: "Konserwacja transkryptów"
+output:
+  html_document: default
+  html_notebook: default
+---
+```{r head, results='hide'}
+if(!require(biomaRt)){source("https://bioconductor.org/biocLite.R"); biocLite("biomaRt"); library(biomaRt)}
+# library(tictoc)
+library(ggplot2)
+library(stringr)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(VennDiagram)
+source("head.R")
+```
+
+# Protein atlas - RNA isoform data
+## Wczytanie danych 
+
+1. Dane o ekspresjonowaniu transkryptów w tkankach: [transcript_rna_tissue.tsv.zip](https://www.proteinatlas.org/about/download).  
+2. Genom referencyjny: [Ensembl 88: Mar 2017](http://mar2017.archive.ensembl.org/)
+```{r read_transcript_rna_tissue}
+# transcripts <- read_tsv("data/transcript_rna_tissue.tsv")
+# dir.create("saved-r-objects", showWarnings=F)
+# saveRDS(transcripts, "saved-r-objects/transcripts.RDS")
+transcripts <- readRDS("saved-r-objects/transcripts.RDS")
+```
+```{r, eval=FALSE, include=FALSE}
+listEnsembl()
+listEnsembl(version=88)
+```
+```{r read_ensembl1, eval=FALSE}
+mart.ensembl.88 <-  useEnsembl(biomart="ensembl",
+																				dataset="hsapiens_gene_ensembl",
+																				version=88)
+# listMarts(ensembl.88)
+```
+```{r, eval=FALSE, include=FALSE}
+listAttributes(mart.ensembl.88) %>% 
+	filter(str_detect(name, "ensembl_transcript_id"))
+listFilters(mart.ensembl.88) %>% 
+	filter(str_detect(description, "eference"))
+```
+```{r read_ensembl2, eval=FALSE}
+# page: structure/sequences
+ensembl.88 <- getBM(attributes=c('chromosome_name',
+																 'ensembl_gene_id',
+																 'ensembl_transcript_id',
+																 'genomic_coding_start',
+																 'genomic_coding_end',
+																 'cds_length'),
+										filters=c('transcript_biotype'),
+										values=c('protein_coding'),
+										mart=mart.ensembl.88)
+# page: feature_page
+ensembl.88.appris <- getBM(attributes=c('chromosome_name',
+																				'ensembl_gene_id',
+																				'ensembl_transcript_id',
+																				'transcript_appris'),
+													 filters=c('transcript_biotype'),
+													 values=c('protein_coding'),
+													 mart=mart.ensembl.88)
+ensembl.88 %>%
+	left_join(ensembl.88.appris, by=c("chromosome_name", 
+																		"ensembl_gene_id", 
+																		"ensembl_transcript_id")) %>%
+	senv(ensembl.88)
+
+# filter ensembl
+ensembl.88 %>%
+	filter(!is.na(genomic_coding_start)) %>% # non-coding exons
+	filter(chromosome_name %in% 1:22) %>%
+	tbl_df %>%
+	senv(ensembl.cds)
+saveRDS(ensembl.cds, "saved-r-objects/ensembl.cds.RDS")
+```
+```{r read_ensembl3}
+ensembl.cds <- readRDS("saved-r-objects/ensembl.cds.RDS")
+```
+
+
+## Konserwacja ewolucyjna transkryptu kanonicznego
+### Wybranie transkryptów kanonicznych:
+
+Wybranie "kanonicznego" transkryptu, tzn:
+
+* kodujący białko
+* mający najwyższą ekspresję wśród dowolnej tkanki
+* uwaga: nie każdy najwyżej ekspresjonowany transkrypt koduje białko!
+* uwaga2: niektóre transkrypty mają identyczne maksimum w obrębie genu
+
+```{r find_canonical}
+# sum(!transcripts$enstid %in% ensembl.hsapiens$ensembl_transcript_id) # 0
+# sum(!transcripts$enstid %in% ensembl.hsapiens.cds$ensembl_transcript_id) # 68705
+# which transcripts
+transcripts %>% 
+	filter(enstid %in% ensembl.cds$ensembl_transcript_id) %>% 
+	mutate(rna_max={apply(select(., contains("V")), 1, max)}) %>% 
+	group_by(ensgid) %>% 
+	filter(rna_max == max(rna_max)) %>% 
+	ungroup() %>% 
+	select(enstid) %>% 
+	unlist() ->
+	canonical_transcripts
+```
+
+### Stworzenie pliku *.bam
+
+Czy konserwacja jest liczona dla one-based czy zero-based [coordinate system](https://www.biostars.org/p/84686/)  
+Wyniki z bigWigAverageOverBed dla przykładowego CDS:
+
+* ENST00000236959.1  
+* size 18  
+* mean 0.160611  
+* min 0.049  
+* max 0.363  
+
+![](pictures/ENST00000236959.1.png)
+```{r}
+# chr2 ENSG00000138363 ENST00000236959 genomic_coding_start 215312143, genomic_coding_end 215312161
+# conservation data
+ENST00000236959.1 <- c(.137, .16, .165, .158, .13, .071, .071, .065, .049, .049, .066, .092, .133, .199, .223, .256, .311, .33, .363)
+
+length(ENST00000236959.1)
+mean(ENST00000236959.1)
+min(ENST00000236959.1)
+max(ENST00000236959.1)
+
+length(ENST00000236959.1[-1])
+mean(ENST00000236959.1[-1])
+min(ENST00000236959.1[-1])
+max(ENST00000236959.1[-1])
+```
+* Ensembl: 1-based
+* bigWigAverageOverBed 0-based
+
+Dlatego przesuwamy genomic_coding_start - 1 w ensembl. Filtrujemy również
+chromosomy różne od chr1-chr22.
+
+```{r canonical_bed_transcripts}
+ensembl.cds %>% 
+	filter(ensembl_transcript_id %in% canonical_transcripts) %>%
+	# arrange(chromosome_name, genomic_coding_start) %>%  #TODO czy ma znaczenie?
+	group_by(ensembl_gene_id) %>% 
+	mutate(nr=row_number()) %>% 
+	ungroup() %>% 
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>% 
+	mutate(ensembl_gene_id=paste0(ensembl_gene_id, ".", nr)) %>% 
+	select(chromosome_name, 
+				 genomic_coding_start, 
+				 genomic_coding_end, 
+				 ensembl_gene_id)  %>%
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-canonical-transcripts.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji
+[hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
+```{bash conservation_scoring_canonical_transcripts, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-canonical-transcripts.bed
+OUT_BED=$DIR/phastCons-canonical.bed
+OUT_TAB=$DIR/phastCons-canonical.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Konserwacja ewolucyjna regionów kodujących bez regionów "kanoniczych"
+
+### Wybór odpowiednich regionów i stworzenie pliku *.bam
+```{r, eval=FALSE, include=FALSE}
+# czy geny nachodza na siebie???
+# TAK http://www.ensembl.org/Homo_sapiens/Gene/Summary?g=ENSG00000251503;r=1:10430102-10452153
+# gdy geny są blisko siebie ich przepisywanie może nachodzić na siebie, nazwa zawiera wtedy myślnik gen1-gen2
+```
+
+```{r noncanonical_bed_transcripts}
+# to 0-based
+ensembl.cds %>% 
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>%
+	get_noncanonical_regions(canonical_transcripts) %>%
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	select(chromosome_name, 
+				 genomic_coding_start, 
+				 genomic_coding_end, 
+				 ensembl_gene_id) %>% 
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-noncanonical-transcripts.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji regionów niekanonicznych
+```{bash conservation_scoring_noncanonical_transcripts, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-noncanonical-transcripts.bed
+OUT_BED=$DIR/phastCons-noncanonical.bed
+OUT_TAB=$DIR/phastCons-noncanonical.bed.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Podsumowanie
+
+```{r summarise_scoring, echo=FALSE}
+# read conservation of canonical transcripts
+phasta.cons.canonical <- read_tsv(file.path("data",
+																						"conservation-scores",
+																						"phastCons-canonical.bed"),
+																	col_names=c("chromosome_name",
+																							"genomic_coding_start",
+																							"genomic_coding_end", 
+																							"name",
+																							"mean", "min", "max"),
+																	col_types='ciicddd')
+
+phasta.cons.canonical %>% 
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>% 
+	group_by(name) %>% 
+	summarise(canonical_mean=mean(mean)) ->
+	phasta.cons.canonical
+
+# read conservation of non-canonical transcripts
+phasta.cons.noncanonical <- read_tsv(file.path("data",
+																							 "conservation-scores",
+																							 "phastCons-noncanonical.bed"),
+																		 col_names=c("chromosome_name",
+																		 						"genomic_coding_start",
+																		 						"genomic_coding_end", 
+																		 						"name",
+																		 						"mean", "min", "max"),
+																		 col_types='ciicddd')
+
+phasta.cons.noncanonical %>% 
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>% 
+	group_by(name) %>% 
+	summarise(noncanonical_mean=mean(mean)) ->
+	phasta.cons.noncanonical
+
+# summarise scoring
+phasta.cons.noncanonical %>% 
+	left_join(phasta.cons.canonical, by=c("name")) %>% 
+	senv(scoring_summary_transcripts)
+
+
+ggplot(scoring_summary_transcripts %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) + 
+	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
+# ggsave("canonical-transcripts.png")
+
+ggplot(scoring_summary_transcripts) + 
+	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
+	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
+# ggsave("canonical-transcripts2.png")
+```
+
+# APPRIS
+
+## Konserwacja ewolucyjna transkryptu kanonicznego (APPRIS annotation)
+
+### Stworzenie pliku *.bam z transkryptami kanonicznymi  (APPRIS annotation)
+```{r canonical_bed_appris}
+# delete multiple canoncial transcripts - mają podobną długość (#todo prawdopodobnie
+# różnią się tylko exonami niekodującymi?)
+# najdłużysz cds, slcak - wiekszosc principal ma taką samą długość cds
+#todo sprawidzć jak dziala funkcja get_noncanonical_regions przy wielu transkryptach kanonicznych w genie
+ensembl.cds %>% 
+	filter(str_detect(transcript_appris, "principal")) %>% 
+	{unique(.$ensembl_transcript_id)} %>% 
+	senv(canonical_appris)
+# todo; czy jeżeli w obrębie genu jest więcej niż jeden principal transcript to czy ma to znaczenie w konserwacji
+
+ensembl.cds %>% 
+	filter(ensembl_transcript_id %in% canonical_appris) %>%
+	# arrange(chromosome_name, genomic_coding_start) %>%  #TODO czy ma znaczenie?
+	group_by(ensembl_gene_id) %>% 
+	mutate(nr=row_number()) %>% 
+	ungroup() %>% 
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>% 
+	mutate(ensembl_gene_id=paste0(ensembl_gene_id, ".", nr)) %>% 
+	select(chromosome_name, 
+				 genomic_coding_start, 
+				 genomic_coding_end, 
+				 ensembl_gene_id)  %>%
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-canonical-appris.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji transkryptów kanonicznych (APPRIS annotation)
+[hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
+```{bash conservation_scoring_canonical_appris, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-canonical-appris.bed
+OUT_BED=$DIR/phastCons-canonical-appris.bed
+OUT_TAB=$DIR/phastCons-canonical-appris.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Konserwacja ewolucyjna regionów kodujących bez regionów "kanoniczych"  (APPRIS annotation)
+
+```{r, eval=FALSE, include=FALSE}
+# czy geny nachodza na siebie???
+# TAK http://www.ensembl.org/Homo_sapiens/Gene/Summary?g=ENSG00000251503;r=1:10430102-10452153
+# gdy geny są blisko siebie ich przepisywanie może nachodzić na siebie, nazwa zawiera wtedy myślnik gen1-gen2
+```
+
+### Stworzenie pliku *.bam z regionami niekanonicznymi  (APPRIS annotation)
+```{r noncanonical_bed_appris}
+ensembl.cds %>% 
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>%
+	get_noncanonical_regions(canonical_appris) %>% 
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	select(chromosome_name, 
+				 genomic_coding_start, 
+				 genomic_coding_end, 
+				 ensembl_gene_id)  %>%
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-noncanonical-appris.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji regionów niekanonicznych (APPRIS annotation)
+```{bash conservation_scoring_noncanonical_appris, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-noncanonical-appris.bed
+OUT_BED=$DIR/phastCons-noncanonical-appris.bed
+OUT_TAB=$DIR/phastCons-noncanonical-appris.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Podsumowanie (APPRIS annotation)
+```{r summarise_scoring_appris, echo=FALSE}
+# read conservation of canonical transcripts
+phasta.cons.canonical <- read_tsv(file.path("data",
+																						"conservation-scores",
+																						"phastCons-canonical-appris.bed"),
+																	col_names = c("chromosome_name",
+																								"genomic_coding_start",
+																								"genomic_coding_end",
+																								"name",
+																								"mean", "min", "max"	),
+																	col_types = 'ciicddd')
+
+phasta.cons.canonical %>% 
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>% 
+	group_by(name) %>% 
+	summarise(canonical_mean=mean(mean)) ->
+	phasta.cons.canonical
+
+# read conservation of non-canonical transcripts
+phasta.cons.noncanonical <- read_tsv(file.path("data", 
+																							 "conservation-scores",
+																							 "phastCons-noncanonical-appris.bed"),
+																		 col_names=c("chromosome_name", 
+																		 						"genomic_coding_start",
+																		 						"genomic_coding_end", "name", 
+																		 						"mean", "min", "max"), 
+																		 col_types='ciicddd')
+
+phasta.cons.noncanonical %>% 
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>% 
+	group_by(name) %>% 
+	summarise(noncanonical_mean=mean(mean)) ->
+	phasta.cons.noncanonical
+
+# summarise scoring
+phasta.cons.noncanonical %>% 
+	left_join(phasta.cons.canonical, by=c("name")) %>% 
+	senv(scoring_summary_appris)
+
+
+ggplot(scoring_summary_appris %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) + 
+	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
+# ggsave("canonical-appris.png")
+
+ggplot(scoring_summary_appris) + 
+	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
+	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
+# ggsave("canonical-appris2.png")
+```
+
+# UCSC
+
+```{bash dowlnoad_knownCanonical, results='hide', eval=F}
+cd data
+wget http://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/knownCanonical.txt.gz
+gzip -d knownCanonical.txt.gz
+```
+
+## Wczytanie knownCanonical (UCSC)
+```{r read_knownCanonical}
+known.canonical <- read_tsv("data/knownCanonical.txt", 
+														col_names = c("chromosome_name", 
+																					"start_position", 
+																					"end_position", 
+																					"ucsc_stable_id", "gene_id"),
+					 col_types = "cii-cc")
+```
+
+## Tłumaczenie nazw transkryptów z UCSC na BioMart
+```{r read_ensembl4, eval=F}
+ensembl.88.ucsc <- getBM(attributes=c('chromosome_name', 
+																			'ensembl_gene_id',
+																			'ensembl_transcript_id', 
+																			'exon_chrom_start',
+																			'exon_chrom_end', 
+																			'genomic_coding_start',
+																			'genomic_coding_end', 
+																			'cds_length'),
+												 filters=c('transcript_biotype', 'ucsc'),
+												 values=list('protein_coding', known.canonical$ucsc_stable_id),
+												 mart=mart.ensembl.88)
+```
+
+```{r }
+# saveRDS(ensembl.88.ucsc, "saved-r-objects/ensembl.ucsc.RDS")
+ensembl.ucsc <- readRDS("saved-r-objects/ensembl.ucsc.RDS")
+```
+## Konserwacja ewolucyjna transkryptu kanonicznego (UCSC)
+### Stworzenie pliku *.bam z transkryptami kanonicznymi (UCSC)
+```{r canonical_bed_ucsc}
+# delete multiple canoncial transcripts
+# najdłużysz cds, slcak - wiekszosc principal ma taką samą długość cds
+canonical_ucsc <- unique(ensembl.ucsc$ensembl_transcript_id)
+
+ensembl.cds %>%
+	filter(ensembl_transcript_id %in% canonical_ucsc) %>%
+	group_by(ensembl_gene_id) %>%
+	mutate(nr=row_number()) %>%
+	ungroup() %>%
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>%
+	mutate(ensembl_gene_id=paste0(ensembl_gene_id, ".", nr)) %>%
+	select(chromosome_name,
+				 genomic_coding_start,
+				 genomic_coding_end,
+				 ensembl_gene_id)  %>%
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-canonical-ucsc.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji dla transkryptów kanonicznych (UCSC)
+[hg38.phastCons20way.bw](http://hgdownload.cse.ucsc.edu/goldenPath/hg38/phastCons20way/)
+```{bash conservation_scoring_canonical_ucsc, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-canonical-ucsc.bed
+OUT_BED=$DIR/phastCons-canonical-ucsc.bed
+OUT_TAB=$DIR/phastCons-canonical-ucsc.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Konserwacja ewolucyjna regionów kodujących bez regionów "kanoniczych" (UCSC)
+
+### Stworzenie pliku *.bam z regionami niekanonicznymi (UCSC)
+```{r, eval=FALSE, include=FALSE}
+# gdy geny są blisko siebie ich przepisywanie może nachodzić na siebie, nazwa zawiera wtedy myślnik gen1-gen2
+```
+
+```{r noncanonical_bed_ucsc}
+# to 0-based
+
+ensembl.cds %>%
+	mutate(genomic_coding_start=as.integer(genomic_coding_start - 1)) %>%
+	get_noncanonical_regions(canonical_ucsc) %>%
+	mutate(chromosome_name=paste0("chr", chromosome_name)) %>%
+	select(chromosome_name,
+				 genomic_coding_start,
+				 genomic_coding_end,
+				 ensembl_gene_id)  %>%
+	write_tsv(file.path("data",
+											"conservation-scores",
+											"ensembl-noncanonical-ucsc.bed"),
+						col_names=F)
+```
+
+### Policzenie konserwacji dla regionów niekanonicznych (UCSC)
+```{bash conservation_scoring_noncanonical_ucsc, eval=F}
+PATH=$PATH:/home/jhajto/programs/
+DIR=/home/jhajto/r-projects/isoform-score/data/conservation-scores/
+
+# conservation scoring: phastCons
+BW=$DIR/hg38-phastCons20way.bw
+BED=$DIR/ensembl-noncanonical-ucsc.bed
+OUT_BED=$DIR/phastCons-noncanonical-ucsc.bed
+OUT_TAB=$DIR/phastCons-noncanonical-ucsc.tab
+
+bigWigAverageOverBed -minMax -bedOut=$OUT_BED $BW $BED $OUT_TAB
+```
+
+## Podsumowanie (UCSC)
+```{r summarise_scoring_ucsc, echo=FALSE}
+# read conservation of canonical transcripts
+phasta.cons.canonical <- read_tsv(file.path("data",
+																						"conservation-scores",
+																						"phastCons-canonical-ucsc.bed"),
+																	col_names=c("chromosome_name",
+																							"genomic_coding_start",
+																							"genomic_coding_end", "name",
+																							"mean", "min", "max"),
+																	col_types='ciicddd')
+
+phasta.cons.canonical %>%
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>%
+	group_by(name) %>%
+	summarise(canonical_mean=mean(mean)) ->
+	phasta.cons.canonical
+
+# read conservation of non-canonical transcripts
+phasta.cons.noncanonical <- read_tsv(file.path("data", "conservation-scores",
+																							 "phastCons-noncanonical-ucsc.bed"),
+																		 col_names=c("chromosome_name",
+																		 						"genomic_coding_start",
+																		 						"genomic_coding_end", "name",
+																		 						"mean", "min", "max"),
+																		 col_types='ciicddd')
+
+phasta.cons.noncanonical %>%
+	mutate(name=str_match(name, "(.*)\\.\\d+")[,2]) %>%
+	group_by(name) %>%
+	summarise(noncanonical_mean=mean(mean)) ->
+	phasta.cons.noncanonical
+
+# summarise scoring
+phasta.cons.noncanonical %>%
+	left_join(phasta.cons.canonical, by=c("name")) %>%
+	mutate(ok = noncanonical_mean < canonical_mean) %>%
+	mutate(difference = canonical_mean - noncanonical_mean) ->
+	scoring_summary_ucsc
+
+
+ggplot(scoring_summary_ucsc %>% gather("is_canonical_mean", "mean_scoring", noncanonical_mean, canonical_mean)) +
+	geom_histogram(aes(x=mean_scoring, fill=is_canonical_mean))
+# ggsave("canonical-ucsc.png")
+
+ggplot(scoring_summary_ucsc) +
+	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
+	geom_density(aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
+# ggsave("canonical-ucsc2.png")
+```
+
+
+
+# Porównanie konserwacji
+
+```{r}
+# ggplot(scoring_summary_transcripts) + 
+# 	geom_density(aes(x=canonical_mean), fill="red", alpha=0.5, adjust=.1) +
+# 	geom_density(data=scoring_summary_ucsc, aes(x=canonical_mean), fill="green", alpha=0.5, adjust=.1) +
+# 	geom_density(data=scoring_summary_appris, aes(x=canonical_mean), fill="blue", alpha=0.5, adjust=.1)
+# 
+# ggplot(scoring_summary_transcripts) + 
+# 	geom_density(aes(x=noncanonical_mean), fill=NA, alpha=0.5, adjust=.1) +
+# 	geom_density(data=scoring_summary_ucsc, aes(x=noncanonical_mean), fill=NA, alpha=0.5, adjust=.1) +
+# 	geom_density(data=scoring_summary_appris, aes(x=noncanonical_mean), fill="blue", alpha=0.5, adjust=.1)
+
+# scoring_summary_transcripts %>% 
+# 	inner_join(scoring_summary_appris, by="name")
+
+ensembl.cds %>% 
+	select(chromosome_name, ensembl_gene_id, ensembl_transcript_id) %>% 
+	mutate(canonical_transcripts=ensembl_transcript_id %in% canonical_transcripts) %>% 
+	mutate(canonical_appris=ensembl_transcript_id %in% canonical_appris) %>% 
+	mutate(canonical_ucsc=ensembl_transcript_id %in% canonical_ucsc) %>% 
+	filter(canonical_transcripts | canonical_appris | canonical_ucsc) %>% 
+	senv(summary.canonical)
+```
+
+
+## Najbardziej ekspresjonowane vs APPRIS
+```{r}
+area1=sum(summary.canonical$canonical_transcripts)
+area2=sum(summary.canonical$canonical_appris)
+cross.area=sum(summary.canonical$canonical_appris & summary.canonical$canonical_transcripts)
+venn.plot <- draw.pairwise.venn(area1=area1,
+																area2=area2,
+																cross.area=cross.area,
+																category=c("Transcripts", "Appris"))
+# grid.newpage()
+# grid.draw(venn.plot)
+```
+
+## Najbardziej ekspresjonowane vs UCSC
+```{r}
+area1=sum(summary.canonical$canonical_transcripts)
+area2=sum(summary.canonical$canonical_ucsc)
+cross.area=sum(summary.canonical$canonical_ucsc & summary.canonical$canonical_transcripts)
+venn.plot <- draw.pairwise.venn(area1=area1,
+																area2=area2,
+																cross.area=cross.area,
+																category=c("Transcripts", "UCSC"))
+# grid.newpage()
+# grid.draw(venn.plot)
+```
+
+## APPRIS vs UCSC
+```{r}
+area1=sum(summary.canonical$canonical_appris)
+area2=sum(summary.canonical$canonical_ucsc)
+cross.area=sum(summary.canonical$canonical_ucsc & summary.canonical$canonical_appris)
+venn.plot <- draw.pairwise.venn(area1=area1,
+																area2=area2,
+																cross.area=cross.area,
+																category=c("Appris", "UCSC"))
+# grid.newpage()
+# grid.draw(venn.plot)
+```
+
+
+
+
+
+
+
+
+
+<!-- ```{r kacper_porownanie, eval=FALSE, include=FALSE} -->
+<!-- l <- read_lines("outside-canonical") -->
+<!-- ll <- tbl_df(l) -->
+<!-- outside_canonical_kac <- read_tsv("outside-canonical", col_names = F, col_types="iic") -->
+<!-- outside_canonical_jac <- get_noncanonical_regions(ensembl.hsapiens.cds, canoncial_transcripts) -->
+<!-- ``` -->
+
+<!-- ENSG00000156113 dużo transkryptów-->
+<!-- ENSG00000251503 geny nachodz na siebie-->
+
+
+
+
