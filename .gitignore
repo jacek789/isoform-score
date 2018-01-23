@@ -45,4 +45,3 @@ plots/
 *.html
 hg38-phastCons20way.bw
 transcript_rna_tissue.tsv
-knownCanonical.txt
